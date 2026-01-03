@@ -8,7 +8,11 @@ import re
 from datetime import datetime
 
 # --- CONFIGURACIÓN ---
-st.set_page_config(page_title="CASUR - Indicadores", layout="wide")
+st.set_page_config(
+    page_title="Indicadores",
+    page_icon="📋",  # <--- AQUI PUSE EL EMOJI DE LISTA
+    layout="wide"
+)
 
 try:
     api_key = st.secrets["GOOGLE_API_KEY"]
@@ -78,7 +82,7 @@ def calcular_metricas(df, ini_vap, ini_agua, ini_ing, ini_ret):
     return df
 
 # --- INTERFAZ ---
-st.title("🏭 CASUR - Digitalizador Automático")
+st.title("Digitalizador Automático")
 
 if not api_key:
     st.error("⚠️ Falta API Key")
@@ -99,7 +103,7 @@ with st.sidebar:
     st.divider()
     archivo = st.file_uploader("Subir Foto", type=["jpg","png","jpeg"])
     
-    if st.button("🔴 BORRAR Y EMPEZAR"):
+    if st.button("Restablecer todo"):
         if 'df_final' in st.session_state: del st.session_state['df_final']
         st.rerun()
 
@@ -109,17 +113,17 @@ if archivo:
     img = Image.open(archivo)
     width, height = img.size
     
-    # Si la foto está vertical (Alto > Ancho), la rotamos -90 grados
+    # Si la foto está vertical (Alto > Ancho), la rotamos 90 grados (Positivo = Antihorario)
     if height > width:
-        img = img.rotate(-90, expand=True)
+        img = img.rotate(90, expand=True) # <--- CAMBIO AQUI (Era -90)
 
     # 2. Mostrar la foto SOLO si el usuario quiere (Expander)
-    with st.expander("📸 Ver Foto Original (Click para abrir)", expanded=False):
+    with st.expander("Ver Foto Original (Click para abrir)", expanded=False):
         st.image(img, use_column_width=True, caption="Imagen Rotada Automáticamente")
 
     # 3. Botón de Procesar
     if 'df_final' not in st.session_state:
-        if st.button("⚡ PROCESAR IMAGEN", type="primary"):
+        if st.button("PROCESAR IMAGEN", type="primary"):
             with st.spinner("Analizando..."):
                 resp = get_data_gemini(img)
                 try:
@@ -142,7 +146,7 @@ if archivo:
 # --- EDICIÓN Y RESULTADOS ---
 if 'df_final' in st.session_state:
     st.divider()
-    st.subheader("📝 Tabla de Datos (Editable)")
+    st.subheader("Tabla de Datos (Editable)")
     st.caption("Si editas un número (columnas blancas), presiona ENTER y el cálculo (gris) se actualiza solo.")
 
     columnas_bloqueadas = ["Tons. Vapor", "Tons. Agua", "Tons. Biomasa Alim.", "Tons. Biomasa Ret.", "FECHA"]
