@@ -22,14 +22,15 @@ except:
 
 if api_key:
     genai.configure(api_key=api_key)
+    # Usamos Flash, pero le subimos un pelín la temperatura para que sea más flexible
     model = genai.GenerativeModel(
         model_name="models/gemini-2.5-flash",
-        generation_config={"temperature": 0.1}
+        generation_config={"temperature": 0.2}
     )
 
-# --- 3. LÓGICA DE IA (Gemini) ---
+# --- 3. FUNCIONES AUXILIARES ---
 def clean_json_string(json_string):
-    """Limpia el texto que devuelve Gemini para obtener solo el JSON puro."""
+    """Limpia el texto basura que a veces manda la IA antes/después del JSON."""
     pattern = r'^```json\s*(.*?)\s*```$'
     match = re.search(pattern, json_string, re.DOTALL)
     if match:
@@ -37,34 +38,34 @@ def clean_json_string(json_string):
     return json_string
 
 def get_gemini_response(image):
-    """Envía la imagen a Gemini usando CLAVES CORTAS para evitar errores de texto."""
+    """Estrategia POSICIONAL: Lee columna por columna sin importar el título."""
     prompt = """
-    Actúa como un digitador industrial experto. Transcribe esta bitácora manuscrita.
+    Actúa como un sistema OCR ciego. Tu único trabajo es extraer la tabla manuscrita.
     
-    CRÍTICO - GEOMETRÍA DE LA IMAGEN:
-    1. La imagen puede estar rotada, léela en el sentido del texto manuscrito.
-    2. ATENCIÓN: La hoja se corta físicamente a la derecha. 
-    3. La PENÚLTIMA columna visible es "Ingreso".
-    4. La ÚLTIMA columna visible es "Retorno".
-    5. NO busques "Picadoras", ignórala.
-
-    USA ESTAS CLAVES EXACTAS (JSON KEYS) PARA LOS DATOS:
-    1. "hora"
-    2. "vapor_tot"       (Totalizador de Vapor)
-    3. "vapor_temp"      (Temperatura de vapor)
-    4. "vapor_pres"      (Presión de Vapor)
-    5. "agua_tot"        (Totalizador agua alimentación)
-    6. "agua_temp"       (Temperatura agua alimentación)
-    7. "agua_pres"       (Presión agua de alimentación)
-    8. "ingreso"         (Totalizador de báscula ingreso - Bagacera)
-    9. "retorno"         (Totalizador de báscula de retorno - Bagacera)
-    10. "picadoras"      (Pon siempre 0)
-
-    Instrucciones:
-    - Devuelve SOLO números. Si está vacío o no se ve, pon 0.
-    - Salida esperada: ÚNICAMENTE un JSON Array válido.
+    ESTRUCTURA VISUAL OBLIGATORIA:
+    - La imagen tiene EXACTAMENTE 9 columnas visibles con datos manuscritos.
+    - La tabla se corta a la derecha. NO inventes una décima columna.
     
-    Ejemplo: [{"hora": "07:00", "vapor_tot": 98523.2, "ingreso": 376992.0, "retorno": 666565.0}]
+    MAPEO POR POSICIÓN (Izquierda a Derecha):
+    1. [c1] -> Hora
+    2. [c2] -> Totalizador Vapor
+    3. [c3] -> Temp Vapor
+    4. [c4] -> Presion Vapor
+    5. [c5] -> Totalizador Agua
+    6. [c6] -> Temp Agua
+    7. [c7] -> Presion Agua
+    8. [c8] -> Totalizador Ingreso (Es la PENÚLTIMA columna visible)
+    9. [c9] -> Totalizador Retorno (Es la ÚLTIMA columna visible)
+
+    INSTRUCCIONES DE EXTRACCIÓN:
+    - Devuelve un JSON Array donde cada objeto tenga las claves: "c1", "c2", "c3", "c4", "c5", "c6", "c7", "c8", "c9".
+    - Si un número no es legible, pon 0.
+    - NO añadas texto, solo el JSON.
+
+    Ejemplo de salida:
+    [
+      {"c1": "07:00", "c2": 98523.2, "c3": 530, "c4": 85, "c5": 10306.5, "c6": 124, "c7": 117, "c8": 376992.0, "c9": 666565.0}
+    ]
     """
     try:
         response = model.generate_content([prompt, image])
@@ -72,11 +73,9 @@ def get_gemini_response(image):
     except Exception as e:
         return f"Error: {str(e)}"
 
-# --- 4. LÓGICA DE CÁLCULO (Python) ---
+# --- 4. LÓGICA DE DATOS ---
 def calculate_metrics(df, initials):
-    """Calcula las diferencias (Consumo) basándose en la fila anterior."""
-    
-    # Aseguramos que las columnas clave sean números
+    # Definimos qué columnas esperamos que sean números
     cols_check = ["Totalizador de Vapor", "Totalizador agua alimentación",
                   "Totalizador de báscula ingreso", "Totalizador de báscula de retorno"]
     
@@ -84,7 +83,7 @@ def calculate_metrics(df, initials):
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
 
-    # --- CÁLCULOS ---
+    # Cálculos
     if "Totalizador de Vapor" in df.columns:
         df["Tons. Vapor"] = df["Totalizador de Vapor"].diff()
         if not df.empty and initials['vapor'] > 0:
@@ -105,114 +104,103 @@ def calculate_metrics(df, initials):
         if not df.empty and initials['bagazo_out'] > 0:
             df.loc[0, "Toneladas Biomasa retorno"] = df.loc[0, "Totalizador de báscula de retorno"] - initials['bagazo_out']
 
+    # Agregamos Picadoras manualmente (siempre 0 porque no sale en foto)
+    df["Totalizador báscula de picadoras"] = 0
     df["Toneladas picadas"] = 0 
+    
     return df
 
-# --- 5. INTERFAZ GRÁFICA ---
-
-st.title("🏭 CaneVolt - Digitalizador V2.0")
+# --- 5. INTERFAZ ---
+st.title("🏭 CaneVolt - Digitalizador V2.1 (Posicional)")
 
 if not api_key:
-    st.error("⚠️ No se detectó la API Key.")
+    st.error("⚠️ No API Key found.")
     st.stop()
 
-# --- SIDEBAR ---
 with st.sidebar:
-    st.header("1. Configuración Inicial")
-    init_vapor = st.number_input("Lectura Vapor", value=0.0, format="%.2f")
-    init_agua = st.number_input("Lectura Agua", value=0.0, format="%.2f")
-    init_bagazo_in = st.number_input("Lectura Bagazo IN", value=0.0, format="%.2f")
-    init_bagazo_out = st.number_input("Lectura Bagazo RET", value=0.0, format="%.2f")
-    
+    st.header("Valores Iniciales (Ayer)")
+    init_vapor = st.number_input("Vapor Inicial", value=0.0)
+    init_agua = st.number_input("Agua Inicial", value=0.0)
+    init_bagazo_in = st.number_input("Bagazo IN Inicial", value=0.0)
+    init_bagazo_out = st.number_input("Bagazo RET Inicial", value=0.0)
     st.divider()
-    uploaded_file = st.file_uploader("Subir Imagen", type=["jpg", "png", "heic", "jpeg"])
-    
-    if st.button("Resetear Todo"):
+    uploaded_file = st.file_uploader("Subir Foto", type=["jpg", "png", "jpeg"])
+    if st.button("Resetear"):
         if 'data' in st.session_state: del st.session_state['data']
         st.rerun()
 
-# --- MAIN ---
-if uploaded_file:
+if uploaded_file and st.button("Procesar", type="primary"):
     img = Image.open(uploaded_file)
-    with st.expander("Ver imagen original", expanded=False):
-        st.image(img, use_column_width=True)
+    st.image(img, use_column_width=True)
+    
+    with st.spinner("Analizando por posición de columnas..."):
+        raw_resp = get_gemini_response(img)
         
-    if st.button("Procesar Bitácora", type="primary"):
-        with st.spinner("Analizando..."):
-            response_text = get_gemini_response(img)
+        # --- ZONA DE DEPURACIÓN (Importante) ---
+        with st.expander("🔍 Ver Datos Crudos (Si falla, mira aquí)", expanded=False):
+            st.code(raw_resp, language='json')
+
+        try:
+            # 1. Limpieza
+            clean_txt = clean_json_string(raw_resp)
+            if '[' in clean_txt:
+                clean_txt = clean_txt[clean_txt.find('['):clean_txt.rfind(']')+1]
             
-            # DEPURACIÓN: Ver qué manda la IA si falla
-            with st.expander("Ver respuesta cruda (Debugging)", expanded=False):
-                st.code(response_text)
+            data = json.loads(clean_txt)
+            df = pd.DataFrame(data)
 
-            try:
-                # 1. Limpieza JSON
-                cleaned_json = clean_json_string(response_text)
-                if '[' in cleaned_json:
-                    start = cleaned_json.find('[')
-                    end = cleaned_json.rfind(']') + 1
-                    cleaned_json = cleaned_json[start:end]
+            # 2. RENOMBRAR (Del c1..c9 a Nombres Reales)
+            mapa = {
+                "c1": "HORA",
+                "c2": "Totalizador de Vapor",
+                "c3": "Temperatura de vapor",
+                "c4": "Presión de Vapor",
+                "c5": "Totalizador agua alimentación",
+                "c6": "Temperatura agua alimentación",
+                "c7": "Presión agua de alimentación",
+                "c8": "Totalizador de báscula ingreso",  # Aquí está el truco
+                "c9": "Totalizador de báscula de retorno" # Y aquí
+            }
+            df = df.rename(columns=mapa)
 
-                data = json.loads(cleaned_json)
-                df = pd.DataFrame(data)
+            # 3. Calcular
+            initials = {'vapor': init_vapor, 'agua': init_agua, 
+                        'bagazo_in': init_bagazo_in, 'bagazo_out': init_bagazo_out}
+            df_calc = calculate_metrics(df, initials)
 
-                # 2. RENOMBRAMIENTO (La Magia para que no salga None)
-                # Mapeamos las claves cortas de la IA a los nombres largos de CASUR
-                mapa_nombres = {
-                    "hora": "HORA",
-                    "vapor_tot": "Totalizador de Vapor",
-                    "vapor_temp": "Temperatura de vapor",
-                    "vapor_pres": "Presión de Vapor",
-                    "agua_tot": "Totalizador agua alimentación",
-                    "agua_temp": "Temperatura agua alimentación",
-                    "agua_pres": "Presión agua de alimentación",
-                    "ingreso": "Totalizador de báscula ingreso",
-                    "retorno": "Totalizador de báscula de retorno",
-                    "picadoras": "Totalizador báscula de picadoras"
-                }
-                df = df.rename(columns=mapa_nombres)
-                
-                # 3. Calcular
-                initial_values = {
-                    'vapor': init_vapor, 'agua': init_agua,
-                    'bagazo_in': init_bagazo_in, 'bagazo_out': init_bagazo_out
-                }
-                df_calc = calculate_metrics(df, initial_values)
-                
-                # 4. Ordenar
-                final_order = [
-                    "HORA",
-                    "Totalizador de Vapor", "Tons. Vapor", 
-                    "Temperatura de vapor", "Presión de Vapor",
-                    "Totalizador agua alimentación", "Tons. Agua",
-                    "Temperatura agua alimentación", "Presión agua de alimentación",
-                    "Totalizador de báscula ingreso", "Toneladas biomasa Alimentación",
-                    "Totalizador de báscula de retorno", "Toneladas Biomasa retorno",
-                    "Totalizador báscula de picadoras", "Toneladas picadas"
-                ]
-                df_final = df_calc.reindex(columns=final_order)
-                
-                st.session_state['data'] = df_final
-                st.rerun()
-                
-            except Exception as e:
-                st.error(f"Error procesando: {e}")
+            # 4. Ordenar Final
+            orden = [
+                "HORA", "Totalizador de Vapor", "Tons. Vapor", 
+                "Temperatura de vapor", "Presión de Vapor",
+                "Totalizador agua alimentación", "Tons. Agua",
+                "Temperatura agua alimentación", "Presión agua de alimentación",
+                "Totalizador de báscula ingreso", "Toneladas biomasa Alimentación",
+                "Totalizador de báscula de retorno", "Toneladas Biomasa retorno",
+                "Totalizador báscula de picadoras", "Toneladas picadas"
+            ]
+            # Usamos reindex para asegurar que todo exista
+            df_final = df_calc.reindex(columns=orden).fillna(0)
+            
+            st.session_state['data'] = df_final
+            st.rerun()
 
-# --- RESULTADOS ---
+        except Exception as e:
+            st.error(f"Error procesando: {e}")
+
+# Mostrar Tabla Final
 if 'data' in st.session_state:
     st.divider()
     edited_df = st.data_editor(st.session_state['data'], num_rows="dynamic", use_container_width=True)
     
-    col1, col2 = st.columns(2)
-    with col1:
-        buffer = io.BytesIO()
-        with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
-            edited_df.to_excel(writer, index=False, sheet_name="Bitacora")
-            workbook = writer.book
-            worksheet = writer.sheets['Bitacora']
-            header_fmt = workbook.add_format({'bold': True, 'bg_color': '#D7E4BC', 'border': 1})
-            for col_num, value in enumerate(edited_df.columns.values):
-                worksheet.write(0, col_num, value, header_fmt)
-                worksheet.set_column(col_num, col_num, 18)
-
-        st.download_button("📥 Descargar Excel", buffer.getvalue(), "Bitacora_CASUR.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", type="primary")
+    # Descarga Excel
+    buffer = io.BytesIO()
+    with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
+        edited_df.to_excel(writer, index=False, sheet_name="Bitacora")
+        workbook = writer.book
+        worksheet = writer.sheets['Bitacora']
+        fmt = workbook.add_format({'bold': True, 'bg_color': '#D7E4BC', 'border': 1})
+        for i, col in enumerate(edited_df.columns):
+            worksheet.write(0, i, col, fmt)
+            worksheet.set_column(i, i, 18)
+            
+    st.download_button("📥 Descargar Excel", buffer.getvalue(), "Bitacora.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
