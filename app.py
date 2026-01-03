@@ -5,10 +5,11 @@ from PIL import Image
 import io
 import json
 import re
+from datetime import datetime
 
 # --- 1. CONFIGURACIÓN DE PÁGINA ---
 st.set_page_config(
-    page_title="EGERSA - Digitalizador",
+    page_title="CASUR - Digitalizador",
     page_icon="🏭",
     layout="wide",
     initial_sidebar_state="expanded"
@@ -22,15 +23,15 @@ except:
 
 if api_key:
     genai.configure(api_key=api_key)
-    # Usamos Flash, pero le subimos un pelín la temperatura para que sea más flexible
+    # Temperatura baja para máxima precisión
     model = genai.GenerativeModel(
         model_name="models/gemini-2.5-flash",
-        generation_config={"temperature": 0.2}
+        generation_config={"temperature": 0.1}
     )
 
 # --- 3. FUNCIONES AUXILIARES ---
 def clean_json_string(json_string):
-    """Limpia el texto basura que a veces manda la IA antes/después del JSON."""
+    """Limpia la respuesta de la IA para sacar solo el JSON."""
     pattern = r'^```json\s*(.*?)\s*```$'
     match = re.search(pattern, json_string, re.DOTALL)
     if match:
@@ -38,31 +39,33 @@ def clean_json_string(json_string):
     return json_string
 
 def get_gemini_response(image):
-    """Estrategia POSICIONAL: Lee columna por columna sin importar el título."""
+    """
+    Lectura estricta basada en el formato físico de CASUR.
+    Lee de Izquierda a Derecha las 9 columnas manuscritas.
+    """
     prompt = """
-    Actúa como un sistema OCR ciego. Tu único trabajo es extraer la tabla manuscrita.
+    Tu tarea es transcribir la bitácora de generación de energía (CASUR).
     
-    ESTRUCTURA VISUAL OBLIGATORIA:
-    - La imagen tiene EXACTAMENTE 9 columnas visibles con datos manuscritos.
-    - La tabla se corta a la derecha. NO inventes una décima columna.
+    LA IMAGEN TIENE EXACTAMENTE 9 COLUMNAS CON DATOS MANUSCRITOS.
+    Ignora los encabezados impresos, lee solo los números escritos a mano en azul.
     
-    MAPEO POR POSICIÓN (Izquierda a Derecha):
-    1. [c1] -> Hora
-    2. [c2] -> Totalizador Vapor
-    3. [c3] -> Temp Vapor
-    4. [c4] -> Presion Vapor
-    5. [c5] -> Totalizador Agua
-    6. [c6] -> Temp Agua
-    7. [c7] -> Presion Agua
-    8. [c8] -> Totalizador Ingreso (Es la PENÚLTIMA columna visible)
-    9. [c9] -> Totalizador Retorno (Es la ÚLTIMA columna visible)
-
-    INSTRUCCIONES DE EXTRACCIÓN:
-    - Devuelve un JSON Array donde cada objeto tenga las claves: "c1", "c2", "c3", "c4", "c5", "c6", "c7", "c8", "c9".
-    - Si un número no es legible, pon 0.
-    - NO añadas texto, solo el JSON.
-
-    Ejemplo de salida:
+    ORDEN EXACTO DE COLUMNAS (Izquierda a Derecha):
+    1. [c1] HORA
+    2. [c2] Totalizador de Vapor
+    3. [c3] Temperatura de Vapor
+    4. [c4] Presión de Vapor
+    5. [c5] Totalizador Agua (Alimentación)
+    6. [c6] Temperatura Agua
+    7. [c7] Presión Agua
+    8. [c8] Totalizador Báscula INGRESO (Bagacera) -> Penúltima columna
+    9. [c9] Totalizador Báscula RETORNO (Bagacera) -> Última columna
+    
+    REGLAS:
+    - La columna "Picadoras" NO suele tener datos, IGNÓRALA.
+    - Devuelve un JSON Array.
+    - Si un dato no se ve, pon 0.
+    
+    Ejemplo JSON:
     [
       {"c1": "07:00", "c2": 98523.2, "c3": 530, "c4": 85, "c5": 10306.5, "c6": 124, "c7": 117, "c8": 376992.0, "c9": 666565.0}
     ]
@@ -75,7 +78,7 @@ def get_gemini_response(image):
 
 # --- 4. LÓGICA DE DATOS ---
 def calculate_metrics(df, initials):
-    # Definimos qué columnas esperamos que sean números
+    # Convertir a números
     cols_check = ["Totalizador de Vapor", "Totalizador agua alimentación",
                   "Totalizador de báscula ingreso", "Totalizador de báscula de retorno"]
     
@@ -83,7 +86,7 @@ def calculate_metrics(df, initials):
         if col in df.columns:
             df[col] = pd.to_numeric(df[col], errors='coerce').fillna(0)
 
-    # Cálculos
+    # Cálculos de Diferencias (Consumos)
     if "Totalizador de Vapor" in df.columns:
         df["Tons. Vapor"] = df["Totalizador de Vapor"].diff()
         if not df.empty and initials['vapor'] > 0:
@@ -95,53 +98,56 @@ def calculate_metrics(df, initials):
             df.loc[0, "Tons. Agua"] = df.loc[0, "Totalizador agua alimentación"] - initials['agua']
 
     if "Totalizador de báscula ingreso" in df.columns:
-        df["Toneladas biomasa Alimentación"] = df["Totalizador de báscula ingreso"].diff()
+        df["Tons. Biomasa Alim."] = df["Totalizador de báscula ingreso"].diff()
         if not df.empty and initials['bagazo_in'] > 0:
-            df.loc[0, "Toneladas biomasa Alimentación"] = df.loc[0, "Totalizador de báscula ingreso"] - initials['bagazo_in']
+            df.loc[0, "Tons. Biomasa Alim."] = df.loc[0, "Totalizador de báscula ingreso"] - initials['bagazo_in']
 
     if "Totalizador de báscula de retorno" in df.columns:
-        df["Toneladas Biomasa retorno"] = df["Totalizador de báscula de retorno"].diff()
+        df["Tons. Biomasa Ret."] = df["Totalizador de báscula de retorno"].diff()
         if not df.empty and initials['bagazo_out'] > 0:
-            df.loc[0, "Toneladas Biomasa retorno"] = df.loc[0, "Totalizador de báscula de retorno"] - initials['bagazo_out']
-
-    # Agregamos Picadoras manualmente (siempre 0 porque no sale en foto)
-    df["Totalizador báscula de picadoras"] = 0
-    df["Toneladas picadas"] = 0 
+            df.loc[0, "Tons. Biomasa Ret."] = df.loc[0, "Totalizador de báscula de retorno"] - initials['bagazo_out']
     
     return df
 
-# --- 5. INTERFAZ ---
-st.title("🏭 CaneVolt - Digitalizador V2.1 (Posicional)")
+# --- 5. INTERFAZ GRÁFICA ---
+st.title("🏭 CASUR - Digitalizador de Bitácoras")
 
 if not api_key:
-    st.error("⚠️ No API Key found.")
+    st.error("⚠️ Falta la API Key en Secrets.")
     st.stop()
 
 with st.sidebar:
-    st.header("Valores Iniciales (Ayer)")
+    st.header("📋 Datos del Reporte")
+    
+    # --- AQUI ESTÁ LO QUE PEDISTE: FECHA ---
+    fecha_reporte = st.date_input("Fecha de la Bitácora", datetime.now())
+    
+    st.header("🔢 Lecturas Iniciales (Ayer)")
     init_vapor = st.number_input("Vapor Inicial", value=0.0)
     init_agua = st.number_input("Agua Inicial", value=0.0)
     init_bagazo_in = st.number_input("Bagazo IN Inicial", value=0.0)
     init_bagazo_out = st.number_input("Bagazo RET Inicial", value=0.0)
+    
     st.divider()
-    uploaded_file = st.file_uploader("Subir Foto", type=["jpg", "png", "jpeg"])
-    if st.button("Resetear"):
+    uploaded_file = st.file_uploader("📸 Subir Foto Bitácora", type=["jpg", "png", "jpeg"])
+    
+    if st.button("🔄 Resetear Todo"):
         if 'data' in st.session_state: del st.session_state['data']
         st.rerun()
 
-if uploaded_file and st.button("Procesar", type="primary"):
+if uploaded_file and st.button("⚡ Procesar Imagen", type="primary"):
     img = Image.open(uploaded_file)
-    st.image(img, use_column_width=True)
+    st.image(img, use_column_width=True, caption="Imagen cargada")
     
-    with st.spinner("Analizando por posición de columnas..."):
+    with st.spinner("Leyendo formato CASUR..."):
         raw_resp = get_gemini_response(img)
         
-        # --- ZONA DE DEPURACIÓN (Importante) ---
-        with st.expander("🔍 Ver Datos Crudos (Si falla, mira aquí)", expanded=False):
-            st.code(raw_resp, language='json')
+        # Debug oculto
+        with st.expander("Ver lectura cruda (Solo si falla)", expanded=False):
+            st.code(raw_resp)
 
         try:
-            # 1. Limpieza
+            # 1. Limpieza JSON
             clean_txt = clean_json_string(raw_resp)
             if '[' in clean_txt:
                 clean_txt = clean_txt[clean_txt.find('['):clean_txt.rfind(']')+1]
@@ -149,8 +155,8 @@ if uploaded_file and st.button("Procesar", type="primary"):
             data = json.loads(clean_txt)
             df = pd.DataFrame(data)
 
-            # 2. RENOMBRAR (Del c1..c9 a Nombres Reales)
-            mapa = {
+            # 2. RENOMBRAR EXACTO AL PAPEL DE CASUR
+            mapa_casur = {
                 "c1": "HORA",
                 "c2": "Totalizador de Vapor",
                 "c3": "Temperatura de vapor",
@@ -158,28 +164,32 @@ if uploaded_file and st.button("Procesar", type="primary"):
                 "c5": "Totalizador agua alimentación",
                 "c6": "Temperatura agua alimentación",
                 "c7": "Presión agua de alimentación",
-                "c8": "Totalizador de báscula ingreso",  # Aquí está el truco
-                "c9": "Totalizador de báscula de retorno" # Y aquí
+                "c8": "Totalizador de báscula ingreso",
+                "c9": "Totalizador de báscula de retorno"
             }
-            df = df.rename(columns=mapa)
+            df = df.rename(columns=mapa_casur)
 
-            # 3. Calcular
+            # 3. AGREGAR LA FECHA (Tu petición)
+            # Insertamos la columna FECHA en la posición 0 (al principio)
+            df.insert(0, "FECHA", fecha_reporte)
+
+            # 4. Calcular Métricas
             initials = {'vapor': init_vapor, 'agua': init_agua, 
                         'bagazo_in': init_bagazo_in, 'bagazo_out': init_bagazo_out}
             df_calc = calculate_metrics(df, initials)
 
-            # 4. Ordenar Final
-            orden = [
-                "HORA", "Totalizador de Vapor", "Tons. Vapor", 
+            # 5. Orden Final para Excel
+            columnas_finales = [
+                "FECHA", "HORA", 
+                "Totalizador de Vapor", "Tons. Vapor", 
                 "Temperatura de vapor", "Presión de Vapor",
                 "Totalizador agua alimentación", "Tons. Agua",
                 "Temperatura agua alimentación", "Presión agua de alimentación",
-                "Totalizador de báscula ingreso", "Toneladas biomasa Alimentación",
-                "Totalizador de báscula de retorno", "Toneladas Biomasa retorno",
-                "Totalizador báscula de picadoras", "Toneladas picadas"
+                "Totalizador de báscula ingreso", "Tons. Biomasa Alim.",
+                "Totalizador de báscula de retorno", "Tons. Biomasa Ret."
             ]
-            # Usamos reindex para asegurar que todo exista
-            df_final = df_calc.reindex(columns=orden).fillna(0)
+            # Reindexamos para ordenar y rellenar faltantes con 0
+            df_final = df_calc.reindex(columns=columnas_finales).fillna(0)
             
             st.session_state['data'] = df_final
             st.rerun()
@@ -187,20 +197,52 @@ if uploaded_file and st.button("Procesar", type="primary"):
         except Exception as e:
             st.error(f"Error procesando: {e}")
 
-# Mostrar Tabla Final
+# --- PANTALLA DE RESULTADOS ---
 if 'data' in st.session_state:
     st.divider()
+    st.subheader("✅ Datos Digitalizados")
+    
     edited_df = st.data_editor(st.session_state['data'], num_rows="dynamic", use_container_width=True)
     
-    # Descarga Excel
-    buffer = io.BytesIO()
-    with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
-        edited_df.to_excel(writer, index=False, sheet_name="Bitacora")
-        workbook = writer.book
-        worksheet = writer.sheets['Bitacora']
-        fmt = workbook.add_format({'bold': True, 'bg_color': '#D7E4BC', 'border': 1})
-        for i, col in enumerate(edited_df.columns):
-            worksheet.write(0, i, col, fmt)
-            worksheet.set_column(i, i, 18)
+    st.write("---")
+    col1, col2 = st.columns([1, 2])
+    
+    with col1:
+        # --- AQUI ESTÁ LO QUE PEDISTE: NOMBRE DE ARCHIVO ---
+        st.write("💾 **Opciones de Descarga**")
+        nombre_default = f"Bitacora_{fecha_reporte}.xlsx"
+        nombre_archivo = st.text_input("Nombre del archivo:", value=nombre_default)
+        
+        # Añadir extensión si el usuario la borró
+        if not nombre_archivo.endswith(".xlsx"):
+            nombre_archivo += ".xlsx"
+
+        # Generar Excel Bonito
+        buffer = io.BytesIO()
+        with pd.ExcelWriter(buffer, engine='xlsxwriter') as writer:
+            edited_df.to_excel(writer, index=False, sheet_name="Bitacora")
+            workbook = writer.book
+            worksheet = writer.sheets['Bitacora']
             
-    st.download_button("📥 Descargar Excel", buffer.getvalue(), "Bitacora.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+            # Estilos CASUR
+            header_fmt = workbook.add_format({
+                'bold': True, 'bg_color': '#4F81BD', 'font_color': 'white', 'border': 1, 'align': 'center'
+            })
+            date_fmt = workbook.add_format({'num_format': 'dd/mm/yyyy', 'border': 1, 'align': 'center'})
+            cell_fmt = workbook.add_format({'border': 1, 'align': 'center'})
+            
+            for i, col in enumerate(edited_df.columns):
+                worksheet.write(0, i, col, header_fmt)
+                # Si es la columna de fecha (la primera), usar formato fecha
+                if i == 0:
+                    worksheet.set_column(i, i, 12, date_fmt)
+                else:
+                    worksheet.set_column(i, i, 15, cell_fmt)
+
+        st.download_button(
+            label="📥 Descargar Excel",
+            data=buffer.getvalue(),
+            file_name=nombre_archivo,
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            type="primary"
+        )
