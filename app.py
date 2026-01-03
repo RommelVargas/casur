@@ -10,7 +10,7 @@ from datetime import datetime
 # --- CONFIGURACIÓN ---
 st.set_page_config(
     page_title="Indicadores",
-    page_icon="📋",  # <--- AQUI PUSE EL EMOJI DE LISTA
+    page_icon="🏭",
     layout="wide"
 )
 
@@ -56,6 +56,7 @@ def get_data_gemini(image):
 
 def calcular_metricas(df, ini_vap, ini_agua, ini_ing, ini_ret):
     """Recálculo reactivo automático."""
+    # 1. Convertir a números
     num_cols = ["Totalizador de Vapor", "Totalizador agua alimentación", 
                 "Totalizador de báscula ingreso", "Totalizador de báscula de retorno"]
     
@@ -63,6 +64,7 @@ def calcular_metricas(df, ini_vap, ini_agua, ini_ing, ini_ret):
         if c in df.columns: 
             df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0)
 
+    # 2. Calcular diferencias
     if "Totalizador de Vapor" in df.columns:
         df["Tons. Vapor"] = df["Totalizador de Vapor"].diff()
         if len(df) > 0: df.loc[0, "Tons. Vapor"] = df.loc[0, "Totalizador de Vapor"] - ini_vap
@@ -82,13 +84,13 @@ def calcular_metricas(df, ini_vap, ini_agua, ini_ing, ini_ret):
     return df
 
 # --- INTERFAZ ---
-st.title("Digitalizador Automático")
+st.title("Digitalizador de Indicadores")
 
 if not api_key:
     st.error("⚠️ Falta API Key")
     st.stop()
 
-# --- BARRA LATERAL (INPUTS) ---
+# --- BARRA LATERAL ---
 with st.sidebar:
     st.header("1. Configuración")
     fecha_dt = st.date_input("Fecha del Reporte", datetime.now())
@@ -107,64 +109,87 @@ with st.sidebar:
         if 'df_final' in st.session_state: del st.session_state['df_final']
         st.rerun()
 
-# --- PROCESAMIENTO INICIAL ---
+# --- PROCESAMIENTO ---
 if archivo:
-    # 1. Abrir y Corregir Orientación (Siempre Horizontal)
     img = Image.open(archivo)
     width, height = img.size
     
-    # Si la foto está vertical (Alto > Ancho), la rotamos 90 grados (Positivo = Antihorario)
+    # Rotación Automática (Positivo = Antihorario)
     if height > width:
-        img = img.rotate(90, expand=True) # <--- CAMBIO AQUI (Era -90)
+        img = img.rotate(90, expand=True)
 
-    # 2. Mostrar la foto SOLO si el usuario quiere (Expander)
-    with st.expander("Ver Foto Original (Click para abrir)", expanded=False):
-        st.image(img, use_column_width=True, caption="Imagen Rotada Automáticamente")
+    with st.expander("Ver Foto Original", expanded=False):
+        st.image(img, use_column_width=True, caption="Imagen Rotada")
 
-    # 3. Botón de Procesar
     if 'df_final' not in st.session_state:
         if st.button("PROCESAR IMAGEN", type="primary"):
-            with st.spinner("Analizando..."):
+            with st.spinner("Generando tabla..."):
                 resp = get_data_gemini(img)
                 try:
                     data = json.loads(clean_json(resp))
-                    cols = ["HORA", "Totalizador de Vapor", "Temperatura de vapor", "Presión de Vapor",
-                            "Totalizador agua alimentación", "Temperatura agua alimentación", "Presión agua de alimentación",
-                            "Totalizador de báscula ingreso", "Totalizador de báscula de retorno"]
+                    # Nombres de columnas RAW (lo que lee la IA)
+                    cols_raw = ["HORA", "Totalizador de Vapor", "Temperatura de vapor", "Presión de Vapor",
+                                "Totalizador agua alimentación", "Temperatura agua alimentación", "Presión agua de alimentación",
+                                "Totalizador de báscula ingreso", "Totalizador de báscula de retorno"]
                     
                     df = pd.DataFrame(data)
                     df = df.iloc[:, :9] 
-                    df.columns = cols[:len(df.columns)]
+                    df.columns = cols_raw[:len(df.columns)]
                     df.insert(0, "FECHA", fecha_dt)
                     
+                    # Calcular métricas (Esto crea las columnas "Tons.")
                     df = calcular_metricas(df, ini_vapor, ini_agua, ini_ingreso, ini_retorno)
+                    
+                    # --- REORDENAMIENTO EXACTO (MATCHING IMAGE) ---
+                    orden_deseado = [
+                        "FECHA", "HORA", 
+                        "Totalizador de Vapor", "Tons. Vapor", 
+                        "Temperatura de vapor", "Presión de Vapor",
+                        "Totalizador agua alimentación", "Tons. Agua",
+                        "Temperatura agua alimentación", "Presión agua de alimentación",
+                        "Totalizador de báscula ingreso", "Tons. Biomasa Alim.",
+                        "Totalizador de báscula de retorno", "Tons. Biomasa Ret."
+                    ]
+                    # Reindexamos para forzar el orden. Si falta alguna, pone 0.
+                    df = df.reindex(columns=orden_deseado).fillna(0)
+                    
                     st.session_state['df_final'] = df
                     st.rerun()
                 except:
-                    st.error("No se pudo leer la tabla. Intenta otra foto.")
+                    st.error("Error leyendo la imagen. Intenta otra.")
 
-# --- EDICIÓN Y RESULTADOS ---
+# --- RESULTADOS ---
 if 'df_final' in st.session_state:
     st.divider()
-    st.subheader("Tabla de Datos (Editable)")
-    st.caption("Si editas un número (columnas blancas), presiona ENTER y el cálculo (gris) se actualiza solo.")
+    st.subheader("Tabla de Datos")
+    st.caption("Los campos grises se calculan automáticamente.")
 
-    columnas_bloqueadas = ["Tons. Vapor", "Tons. Agua", "Tons. Biomasa Alim.", "Tons. Biomasa Ret.", "FECHA"]
+    cols_bloqueadas = ["Tons. Vapor", "Tons. Agua", "Tons. Biomasa Alim.", "Tons. Biomasa Ret.", "FECHA"]
 
     df_editado = st.data_editor(
         st.session_state['df_final'],
-        disabled=columnas_bloqueadas,
+        disabled=cols_bloqueadas,
         num_rows="dynamic",
         key="editor_datos",
         use_container_width=True,
         height=500
     )
 
-    inputs_cols = [c for c in df_editado.columns if c not in columnas_bloqueadas]
-    
-    if not df_editado[inputs_cols].equals(st.session_state['df_final'][inputs_cols]):
-        df_recalculado = calcular_metricas(df_editado, ini_vapor, ini_agua, ini_ingreso, ini_retorno)
-        st.session_state['df_final'] = df_recalculado
+    # Detectar cambios para recalcular
+    inputs = [c for c in df_editado.columns if c not in cols_bloqueadas]
+    if not df_editado[inputs].equals(st.session_state['df_final'][inputs]):
+        df_recalc = calcular_metricas(df_editado, ini_vapor, ini_agua, ini_ingreso, ini_retorno)
+        # Asegurar orden de nuevo tras recalculo
+        orden_deseado = [
+            "FECHA", "HORA", 
+            "Totalizador de Vapor", "Tons. Vapor", 
+            "Temperatura de vapor", "Presión de Vapor",
+            "Totalizador agua alimentación", "Tons. Agua",
+            "Temperatura agua alimentación", "Presión agua de alimentación",
+            "Totalizador de báscula ingreso", "Tons. Biomasa Alim.",
+            "Totalizador de báscula de retorno", "Tons. Biomasa Ret."
+        ]
+        st.session_state['df_final'] = df_recalc[orden_deseado]
         st.rerun()
 
     st.write("---")
@@ -177,16 +202,30 @@ if 'df_final' in st.session_state:
             df_editado.to_excel(writer, index=False, sheet_name="Bitacora")
             workbook = writer.book
             worksheet = writer.sheets['Bitacora']
-            fmt1 = workbook.add_format({'bold': True, 'bg_color': '#D7E4BC', 'border': 1})
-            fmt2 = workbook.add_format({'num_format': 'dd/mm/yyyy', 'border': 1})
+            
+            # --- ESTILOS VISUALES ---
+            # Header Amarillo (#FFFF00) con texto negro
+            fmt_header = workbook.add_format({
+                'bold': True, 
+                'bg_color': '#FFFF00', # Amarillo Brillante
+                'font_color': '#000000', # Texto Negro
+                'border': 1,
+                'align': 'center',
+                'valign': 'vcenter'
+            })
+            fmt_date = workbook.add_format({'num_format': 'yyyy-mm-dd', 'border': 1, 'align': 'center'})
+            fmt_cell = workbook.add_format({'border': 1, 'align': 'center'})
             
             for i, col in enumerate(df_editado.columns):
-                worksheet.write(0, i, col, fmt1)
-                if col == "FECHA": worksheet.set_column(i, i, 12, fmt2)
-                else: worksheet.set_column(i, i, 15)
+                worksheet.write(0, i, col, fmt_header)
+                if col == "FECHA":
+                    worksheet.set_column(i, i, 12, fmt_date)
+                    worksheet.write_column(1, i, df_editado[col], fmt_date)
+                else:
+                    worksheet.set_column(i, i, 15, fmt_cell)
 
         st.download_button(
-            label="📥 DESCARGAR EXCEL FINAL",
+            label="📥 DESCARGAR EXCEL",
             data=buffer.getvalue(),
             file_name=nombre_archivo,
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
